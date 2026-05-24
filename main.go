@@ -1,5 +1,6 @@
 package main
 
+import _ "github.com/lib/pq"
 import (
 	"log"
 	"net/http"
@@ -8,12 +9,26 @@ import (
 	"encoding/json"
 	"slices"
 	"strings"
+	"database/sql"
+	"os"
+	"github.com/joho/godotenv"
+	"github.com/zaid-nawaz/chirpy/internal/database"
+	"github.com/google/uuid"
+	"time"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	db *database.Queries
+	platform string
 }
 
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
 
 
 func my_func(w http.ResponseWriter, _ *http.Request){
@@ -55,13 +70,23 @@ func (cfg *apiConfig) getRequestCount(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func (cfg *apiConfig) setCountZero(w http.ResponseWriter, r *http.Request) {
+func (apiCfg *apiConfig) resetHandler(w http.ResponseWriter, r *http.Request) {
 
-	w.Header().Set("Content-Type" , "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	cfg.fileserverHits.Store(0)
-	w.Write([]byte(fmt.Sprintf("Hits: %d", cfg.fileserverHits.Load())))
+	if apiCfg.platform != "dev" {
+		respondWithError(w, 403, "forbidden")
+		return
+	}
 
+	err := apiCfg.db.DeleteAllUsers(r.Context())
+
+	if err != nil {
+		respondWithError(w, 500, err.Error())
+		return
+	}
+
+	respondWithJSON(w, 200, map[string]string{
+		"message": "all users deleted",
+	})
 }
 
 func respondWithError(w http.ResponseWriter, code int, msg string) {
@@ -157,7 +182,57 @@ func validate_chirp(w http.ResponseWriter, r *http.Request){
 
 }
 
+func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request){
+
+	type parameters struct {
+		Email string `json:"email"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, 400, err.Error())
+		return
+	}
+
+
+	user, err := apiCfg.db.CreateUser(r.Context(), params.Email)
+
+	if err != nil {
+		respondWithError(w, 400, err.Error())
+		return
+	}
+
+	payload := User{
+		ID : user.ID,
+		CreatedAt : user.CreatedAt,
+		UpdatedAt : user.UpdatedAt,
+		Email : user.Email,
+	}
+
+	respondWithJSON(w, 201, payload)
+
+}
+
 func main() {
+
+	godotenv.Load()
+
+	dbURL := os.Getenv("DB_URL")
+	platform := os.Getenv("PLATFORM")
+
+	db, err := sql.Open("postgres", dbURL)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	dbQueries := database.New(db)
+
+	_ = dbQueries
+
 	mux := http.NewServeMux()
 
 
@@ -168,7 +243,10 @@ func main() {
 	}
 
 	
-	apiCfg := &apiConfig{}
+	apiCfg := &apiConfig{
+		db : dbQueries,
+		platform : platform,
+	}
 
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
 	
@@ -176,12 +254,15 @@ func main() {
 	mux.HandleFunc("GET /api/healthz", my_func)
 	mux.HandleFunc("GET /admin/metrics", apiCfg.getRequestCount)
 
-	mux.HandleFunc("POST /admin/reset", apiCfg.setCountZero)
+	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
 
 	mux.HandleFunc("POST /api/validate_chirp", validate_chirp)
 
+	mux.HandleFunc("POST /api/users", apiCfg.createUserHandler )
 	
 
 	log.Fatal(server.ListenAndServe())
 	
 }
+
+//connection string - postgres://postgres:postgres@localhost:5432/chirpy
