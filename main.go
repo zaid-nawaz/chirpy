@@ -38,6 +38,16 @@ type Chirp struct {
 	UserID    uuid.UUID `json:"user_id"`
 }
 
+func toChirpResponse(c database.Chirp) Chirp {
+    return Chirp{
+        ID:        c.ID,
+        CreatedAt: c.CreatedAt,
+        UpdatedAt: c.UpdatedAt,
+        Body:      c.Body,
+        UserID:    c.UserID,
+    }
+}
+
 
 func my_func(w http.ResponseWriter, _ *http.Request){
 
@@ -244,6 +254,52 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Reques
 
 }
 
+func (apiCfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request){
+
+
+	items , err := apiCfg.db.GetChirps(r.Context())
+	if err != nil {
+		respondWithError(w, 400, err.Error())
+		return
+	}
+
+	responses := make([]Chirp, len(items))
+
+	for i , item := range items {
+		responses[i] = toChirpResponse(item)
+	}
+
+	respondWithJSON(w, 200, responses)
+
+}
+
+func (apiCfg *apiConfig) getSingleChirpHandler(w http.ResponseWriter, r *http.Request){
+
+	chirpIDString := r.PathValue("chirpID")
+
+	chirpID, err := uuid.Parse(chirpIDString)
+
+
+	i, err := apiCfg.db.GetChirp(r.Context(), chirpID)
+
+	if err != nil {
+		respondWithError(w, 404, err.Error())
+		return
+	}
+
+	payload := Chirp{
+		ID:        i.ID,
+		CreatedAt: i.CreatedAt,
+		UpdatedAt: i.UpdatedAt,
+		Body:      i.Body,
+		UserID:    i.UserID,
+	}
+
+	respondWithJSON(w, 200, payload)
+
+}
+
+
 func main() {
 
 	godotenv.Load()
@@ -289,6 +345,10 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.createUserHandler )
 
 	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpHandler )
+
+	mux.HandleFunc("GET /api/chirps", apiCfg.getChirpHandler )
+
+	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getSingleChirpHandler )
 	
 
 	log.Fatal(server.ListenAndServe())
