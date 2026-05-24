@@ -30,6 +30,14 @@ type User struct {
 	Email     string    `json:"email"`
 }
 
+type Chirp struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string 	`json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
+}
+
 
 func my_func(w http.ResponseWriter, _ *http.Request){
 
@@ -148,8 +156,15 @@ func cleanedBody(body string, profane []string) string {
 
 func validate_chirp(w http.ResponseWriter, r *http.Request){
 
+
+
+}
+
+func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Request){
+
 	type parameters struct {
 		Body string `json:"body"`
+		UserId uuid.UUID `json:"user_id"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -169,17 +184,30 @@ func validate_chirp(w http.ResponseWriter, r *http.Request){
 	profaneWords := []string{"kerfuffle", "sharbert", "fornax"}
 	params.Body = cleanedBody(params.Body, profaneWords)
 
-	type cleanedResponse struct {
-		CleanedBody string `json:"cleaned_body"`
+	i, err := apiCfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
+		Body : params.Body,
+		UserID : params.UserId,
+		
+	})
+
+	payload := Chirp{
+		ID : i.ID,
+		CreatedAt : i.CreatedAt,
+		UpdatedAt : i.UpdatedAt,
+		Body : i.Body,
+		UserID : i.UserID,
 	}
 
-	payload := cleanedResponse{
-		CleanedBody : params.Body,
-	}
+	// type cleanedResponse struct {
+	// 	CleanedBody string `json:"cleaned_body"`
+	// }
+
+	// payload := cleanedResponse{
+	// 	CleanedBody : params.Body,
+	// }
 
 
-	respondWithJSON(w, 200, payload)
-
+	respondWithJSON(w, 201, payload)
 }
 
 func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Request){
@@ -259,6 +287,8 @@ func main() {
 	mux.HandleFunc("POST /api/validate_chirp", validate_chirp)
 
 	mux.HandleFunc("POST /api/users", apiCfg.createUserHandler )
+
+	mux.HandleFunc("POST /api/chirps", apiCfg.createChirpHandler )
 	
 
 	log.Fatal(server.ListenAndServe())
