@@ -15,6 +15,7 @@ import (
 	"github.com/zaid-nawaz/chirpy/internal/database"
 	"github.com/google/uuid"
 	"time"
+	"github.com/zaid-nawaz/chirpy/internal/auth"
 )
 
 type apiConfig struct {
@@ -224,6 +225,7 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Reques
 
 	type parameters struct {
 		Email string `json:"email"`
+		Password string `json:"password"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -235,8 +237,12 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	HashedPassword, _ := auth.HashPassword(params.Password)
 
-	user, err := apiCfg.db.CreateUser(r.Context(), params.Email)
+	user, err := apiCfg.db.CreateUser(r.Context(), database.CreateUserParams{
+		Email : params.Email,
+		HashedPassword : HashedPassword,
+	})
 
 	if err != nil {
 		respondWithError(w, 400, err.Error())
@@ -299,6 +305,57 @@ func (apiCfg *apiConfig) getSingleChirpHandler(w http.ResponseWriter, r *http.Re
 
 }
 
+func (apiCfg *apiConfig) loginAuthentication(w http.ResponseWriter, r *http.Request){
+
+
+	type parameters struct {
+		Email string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err := decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, 400, err.Error())
+		return
+	}
+
+	i, err := apiCfg.db.GetUserByEmail(r.Context(), params.Email)
+
+	if err != nil {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+
+	matched, err := auth.CheckPasswordHash(params.Password, i.HashedPassword)
+
+	if err != nil {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+
+	if !matched {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+
+
+
+	
+	payload := User{
+		ID : i.ID,
+		CreatedAt : i.CreatedAt,
+		UpdatedAt : i.UpdatedAt,
+		Email : i.Email,
+	}
+
+	respondWithJSON(w, 200, payload)
+	
+
+}
+
 
 func main() {
 
@@ -349,10 +406,12 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", apiCfg.getChirpHandler )
 
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getSingleChirpHandler )
+
+	mux.HandleFunc("POST /api/login", apiCfg.loginAuthentication )
 	
 
 	log.Fatal(server.ListenAndServe())
 	
 }
 
-//connection string - postgres://postgres:postgres@localhost:5432/chirpy
+//connection string - postgres://postgres:postgres@localhost:5432/chirpy?sslmode=disable
