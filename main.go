@@ -16,12 +16,15 @@ import (
 	"github.com/google/uuid"
 	"time"
 	"github.com/zaid-nawaz/chirpy/internal/auth"
+	"sort"
 )
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	db *database.Queries
 	platform string
+	signingSecret string
+	polkaKey string
 }
 
 type User struct {
@@ -29,6 +32,9 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token 	  string 	`json:"token"`
+	RefreshToken string `json:"refresh_token"`
+	IsChirpyRed bool `json:"is_chirpy_red"`
 }
 
 type Chirp struct {
@@ -187,6 +193,21 @@ func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	tokenString, err := auth.GetBearerToken(r.Header)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	userID , err := auth.ValidateJWT(tokenString, apiCfg.signingSecret)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+	
+
 	if len(params.Body) > 140 {
 		respondWithError(w, 400, "Chirp is too long")
 		return
@@ -197,7 +218,7 @@ func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Reque
 
 	i, err := apiCfg.db.CreateChirp(r.Context(), database.CreateChirpParams{
 		Body : params.Body,
-		UserID : params.UserId,
+		UserID : userID,
 		
 	})
 
@@ -206,7 +227,7 @@ func (apiCfg *apiConfig) createChirpHandler(w http.ResponseWriter, r *http.Reque
 		CreatedAt : i.CreatedAt,
 		UpdatedAt : i.UpdatedAt,
 		Body : i.Body,
-		UserID : i.UserID,
+		UserID : userID,
 	}
 
 	// type cleanedResponse struct {
@@ -254,6 +275,7 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Reques
 		CreatedAt : user.CreatedAt,
 		UpdatedAt : user.UpdatedAt,
 		Email : user.Email,
+		IsChirpyRed : user.IsChirpyRed,
 	}
 
 	respondWithJSON(w, 201, payload)
@@ -262,6 +284,41 @@ func (apiCfg *apiConfig) createUserHandler(w http.ResponseWriter, r *http.Reques
 
 func (apiCfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request){
 
+
+	authorId := r.URL.Query().Get("author_id")
+	sortedStyle := r.URL.Query().Get("sort")
+
+	if authorId != "" {
+
+		authorIdParsed , err := uuid.Parse(authorId)
+
+		items , err := apiCfg.db.GetChirpsByAuthor(r.Context(), authorIdParsed)
+
+		if err != nil {
+			respondWithError(w, 400, err.Error())
+			return
+		}
+
+		responses := make([]Chirp, len(items))
+
+		for i , item := range items {
+			responses[i] = toChirpResponse(item)
+		}
+
+		if sortedStyle != ""{
+			if sortedStyle == "asc" {
+				sort.Slice(responses, func(i, j int) bool {return responses[i].CreatedAt.Before(responses[j].CreatedAt) })
+			}
+			
+			if sortedStyle == "desc" {
+				sort.Slice(responses, func(i, j int) bool {return responses[i].CreatedAt.After(responses[j].CreatedAt) })
+
+			} 
+		}
+
+		respondWithJSON(w, 200, responses)
+		return
+	}
 
 	items , err := apiCfg.db.GetChirps(r.Context())
 	if err != nil {
@@ -273,6 +330,17 @@ func (apiCfg *apiConfig) getChirpHandler(w http.ResponseWriter, r *http.Request)
 
 	for i , item := range items {
 		responses[i] = toChirpResponse(item)
+	}
+
+	if sortedStyle != ""{
+		if sortedStyle == "asc" {
+			sort.Slice(responses, func(i, j int) bool {return responses[i].CreatedAt.Before(responses[j].CreatedAt) })
+		}
+			
+		if sortedStyle == "desc" {
+			sort.Slice(responses, func(i, j int) bool {return responses[i].CreatedAt.After(responses[j].CreatedAt) })
+
+		} 
 	}
 
 	respondWithJSON(w, 200, responses)
@@ -311,6 +379,7 @@ func (apiCfg *apiConfig) loginAuthentication(w http.ResponseWriter, r *http.Requ
 	type parameters struct {
 		Email string `json:"email"`
 		Password string `json:"password"`
+		ExpiresInSeconds *int `json:"expires_in_seconds"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -323,11 +392,35 @@ func (apiCfg *apiConfig) loginAuthentication(w http.ResponseWriter, r *http.Requ
 	}
 
 	i, err := apiCfg.db.GetUserByEmail(r.Context(), params.Email)
+	
+	expiresIn := time.Hour
+
+	if params.ExpiresInSeconds != nil && *params.ExpiresInSeconds < 3600 {
+		expiresIn = time.Duration(*params.ExpiresInSeconds) * time.Second
+	}
+
+	ss, err := auth.MakeJWT(i.ID, apiCfg.signingSecret, expiresIn)
+
 
 	if err != nil {
 		respondWithError(w, 401, "Incorrect email or password")
 		return
 	}
+
+	refreshToken := auth.MakeRefreshToken()
+
+	_, err = apiCfg.db.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{
+		Token : refreshToken,
+		UserID : i.ID,
+		ExpiresAt : time.Now().Add(60 * 24 * time.Hour),
+	})
+
+	if err != nil {
+	respondWithError(w, 500, "Couldn't save refresh token")
+	return
+	}
+	
+
 
 	matched, err := auth.CheckPasswordHash(params.Password, i.HashedPassword)
 
@@ -349,10 +442,219 @@ func (apiCfg *apiConfig) loginAuthentication(w http.ResponseWriter, r *http.Requ
 		CreatedAt : i.CreatedAt,
 		UpdatedAt : i.UpdatedAt,
 		Email : i.Email,
+		Token : ss,
+		RefreshToken : refreshToken,
+		IsChirpyRed : i.IsChirpyRed,
 	}
 
 	respondWithJSON(w, 200, payload)
 	
+
+}
+
+func (apiCfg *apiConfig) refreshTokenHandler(w http.ResponseWriter, r *http.Request){
+
+	type response struct {
+		Token string `json:"token"`
+	}
+
+	tokenString, err := auth.GetBearerToken(r.Header)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	refreshToken, err := apiCfg.db.GetRefreshToken(r.Context(), tokenString)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	user, err := apiCfg.db.GetUserFromRefreshToken(r.Context(), refreshToken.Token)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	expiresIn := time.Hour
+	ss, err := auth.MakeJWT(user.ID, apiCfg.signingSecret, expiresIn)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	payload := response{
+		Token : ss,
+	}
+
+	respondWithJSON(w, 200, payload)
+
+	
+}
+
+func (apiCfg *apiConfig) revokeTokenHandler(w http.ResponseWriter, r *http.Request){
+
+	refreshToken, err := auth.GetBearerToken(r.Header)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	err = apiCfg.db.RevokeRefreshToken(
+		r.Context(),
+		refreshToken,
+	)
+
+	if err != nil {
+		respondWithError(w, 500, "Couldn't revoke token")
+		return
+	}
+
+	w.WriteHeader(204)
+	
+}
+
+func (apiCfg *apiConfig) updateUserHandler(w http.ResponseWriter, r *http.Request){
+
+	accessToken, err := auth.GetBearerToken(r.Header)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	userID, err := auth.ValidateJWT(accessToken, apiCfg.signingSecret)
+
+	if err != nil {
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+
+
+	type parameters struct {
+		Email string `json:"email"`
+		Password string `json:"password"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, 400, err.Error())
+		return
+	}
+
+	HashedPassword, _ := auth.HashPassword(params.Password)
+
+	user , err := apiCfg.db.UpdateUserCredentials(r.Context(), database.UpdateUserCredentialsParams{
+		ID : userID,
+		Email : params.Email,
+		HashedPassword : HashedPassword,
+	})
+
+	if err != nil {
+		respondWithError(w, 500, "Couldn't update user")
+		return
+	}
+
+	payload := User{
+		ID : user.ID,
+		CreatedAt : user.CreatedAt,
+		UpdatedAt : user.UpdatedAt,
+		Email : user.Email,
+		IsChirpyRed : user.IsChirpyRed,
+	}
+
+	respondWithJSON(w, 200, payload)
+
+}
+
+func (apiCfg *apiConfig) deleteChirpHandler(w http.ResponseWriter, r *http.Request){
+
+	accessToken, err := auth.GetBearerToken(r.Header)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	userID, err := auth.ValidateJWT(accessToken, apiCfg.signingSecret)
+
+	if err != nil {
+		respondWithError(w, 403, "Unauthorized")
+		return
+	}
+
+	chirpIDString := r.PathValue("chirpID")
+
+	chirpID, err := uuid.Parse(chirpIDString)
+
+	_ , err = apiCfg.db.DeleteChirp(r.Context(), database.DeleteChirpParams{
+		ID : chirpID,
+		UserID : userID,
+	})
+
+	if err != nil {
+		respondWithError(w, 403, err.Error())
+	}
+
+	w.WriteHeader(204)
+
+
+
+}
+
+func (apiCfg *apiConfig) webhookHandler(w http.ResponseWriter, r *http.Request){
+
+	type parameters struct {
+		Event string `json:"event"`
+		Data struct {
+			UserID  uuid.UUID `json:"user_id"`
+		} `json:"data"`
+	}
+
+	ApiKey, err := auth.GetAPIKey(r.Header)
+
+	if err != nil {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	if ApiKey != apiCfg.polkaKey {
+		respondWithError(w, 401, err.Error())
+		return
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	params := parameters{}
+	err = decoder.Decode(&params)
+
+	if err != nil {
+		respondWithError(w, 400, err.Error())
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		w.WriteHeader(204)
+	}
+
+	_, err = apiCfg.db.UpgradeUserToChirpyRed(r.Context(), params.Data.UserID)
+
+	if err != nil {
+		respondWithError(w, 404, err.Error())
+		return
+	}
+
+	w.WriteHeader(204)
+
+
 
 }
 
@@ -363,6 +665,8 @@ func main() {
 
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	signingSecret := os.Getenv("SIGNING_SECRET")
+	polkaKey := os.Getenv("POLKA_KEY")
 
 	db, err := sql.Open("postgres", dbURL)
 
@@ -387,12 +691,14 @@ func main() {
 	apiCfg := &apiConfig{
 		db : dbQueries,
 		platform : platform,
+		signingSecret : signingSecret,
+		polkaKey :  polkaKey,
 	}
 
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app/", http.FileServer(http.Dir(".")))))
-	
 
 	mux.HandleFunc("GET /api/healthz", my_func)
+
 	mux.HandleFunc("GET /admin/metrics", apiCfg.getRequestCount)
 
 	mux.HandleFunc("POST /admin/reset", apiCfg.resetHandler)
@@ -408,7 +714,16 @@ func main() {
 	mux.HandleFunc("GET /api/chirps/{chirpID}", apiCfg.getSingleChirpHandler )
 
 	mux.HandleFunc("POST /api/login", apiCfg.loginAuthentication )
+
+	mux.HandleFunc("POST /api/refresh", apiCfg.refreshTokenHandler )
+
+	mux.HandleFunc("POST /api/revoke", apiCfg.revokeTokenHandler )
 	
+	mux.HandleFunc("PUT /api/users", apiCfg.updateUserHandler )
+
+	mux.HandleFunc("DELETE /api/chirps/{chirpID}", apiCfg.deleteChirpHandler )
+
+	mux.HandleFunc("POST /api/polka/webhooks", apiCfg.webhookHandler )
 
 	log.Fatal(server.ListenAndServe())
 	

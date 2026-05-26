@@ -18,3 +18,16 @@ ORDER BY created_at ASC;
 SELECT *
 FROM chirps
 WHERE id = $1;
+
+-- name: DeleteChirp :one
+DELETE FROM chirps
+WHERE id = $1
+AND user_id = $2
+RETURNING *;
+
+-- name: GetChirpsByAuthor :many
+SELECT *
+FROM chirps
+WHERE user_id = $1
+ORDER BY created_at ASC;
+
